@@ -1,0 +1,181 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <ArduinoJson.h>
+
+// ===== WiFi and MQTT Credentials =====
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+const char* mqtt_server = "151.95.192.8";
+const int   mqtt_port   = 1883;
+const char* mqtt_user   = "Tonno16bit";
+const char* mqtt_pass   = "987654321";
+const char* mqtt_topic  = "servo/positions";
+
+// ===== PCA9685 Setup =====
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+// Set the PWM frequency to 50 Hz for servos
+const uint16_t servoFreq = 50;
+
+// ===== Calibration Arrays for the Servos =====
+// Allowed servo angle range for each channel (modifiable per servo)
+int servoAngleMin[16] = { 45, 45, 45, 45, 45, 45, 45, 45,
+                          45, 45, 45, 45, 45, 45, 45, 45 };
+int servoAngleMax[16] = { 135, 135, 135, 135, 135, 135, 135, 135,
+                          135, 135, 135, 135, 135, 135, 135, 135 };
+
+// Corresponding PCA9685 pulse limits per channel (adjust as needed)
+// These values typically map the angle range to pulse widths in "ticks"
+// (for example, 150 and 600 are common values at 50Hz with a 12-bit resolution).
+uint16_t servoPulseMin[16] = { 150, 150, 150, 150, 150, 150, 150, 150,
+                               150, 150, 150, 150, 150, 150, 150, 150 };
+uint16_t servoPulseMax[16] = { 600, 600, 600, 600, 600, 600, 600, 600,
+                               600, 600, 600, 600, 600, 600, 600, 600 };
+
+// ===== Interpolation Variables =====
+// currentPositions: current servo angles (float for smooth interpolation)
+// startPositions: positions at the moment a new target is received
+// targetPositions: desired target angles received via MQTT
+float currentPositions[16] = {0};
+float startPositions[16]   = {0};
+float targetPositions[16]  = {0};
+
+// Interpolation timing
+unsigned long interpStartTime = 0;
+const unsigned long interpDuration = 1000; // in milliseconds
+
+// For the interpolation update interval (20ms)
+unsigned long lastInterpUpdate = 0;
+const unsigned long interpInterval = 20;
+
+// ===== WiFi and MQTT objects =====
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// ----- WiFi Connection -----
+void setup_wifi(){
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ----- MQTT Reconnection -----
+void reconnect() {
+  while (!client.connected()){
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32ServoController", mqtt_user, mqtt_pass)){
+      Serial.println(" connected");
+      client.subscribe(mqtt_topic);
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" trying again in 5 seconds...");
+      delay(5000);
+    }
+  }
+}
+
+// ----- Helper Function: Map Angle to Pulse -----
+// Each servo channel maps a given angle (within its calibrated range)
+// to a pulse width (in ticks) to be sent to the PCA9685.
+uint16_t angleToPulse(uint8_t channel, int angle) {
+  // Constrain angle to the calibrated limits:
+  angle = constrain(angle, servoAngleMin[channel], servoAngleMax[channel]);
+  return map(angle, 
+             servoAngleMin[channel], servoAngleMax[channel], 
+             servoPulseMin[channel], servoPulseMax[channel]);
+}
+
+// ----- MQTT Callback -----
+// Called when a new MQTT message arrives. The payload is expected
+// to be a JSON array of 16 integer angles (one per servo).
+void callback(char* topic, byte* payload, unsigned int length) {
+  // Copy payload into a null-terminated string
+  char json[length + 1];
+  memcpy(json, payload, length);
+  json[length] = '\0';
+
+  // Parse the JSON array using ArduinoJson:
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, json);
+  if (error) {
+    Serial.print("JSON parse failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  JsonArray arr = doc.as<JsonArray>();
+  if (arr.size() != 16) {
+    Serial.print("Expected 16 values, but got ");
+    Serial.println(arr.size());
+    return;
+  }
+  
+  // On receiving a new target, update the interpolation:
+  // Use the currentPositions as starting positions, and set new target values.
+  for (int i = 0; i < 16; i++){
+    startPositions[i] = currentPositions[i];
+    targetPositions[i] = arr[i];
+  }
+  interpStartTime = millis(); // restart interpolation timer
+  
+  Serial.print("Received new target positions: ");
+  Serial.println(json);
+}
+
+void setup(){
+  Serial.begin(115200);
+  
+  // ===== Initialize WiFi and MQTT =====
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  
+  // ===== Initialize the PCA9685 =====
+  pwm.begin();
+  pwm.setPWMFreq(servoFreq);
+  
+  // Initialize servo positions to a default value (e.g. midpoint)
+  for (int i = 0; i < 16; i++){
+    currentPositions[i] = (servoAngleMin[i] + servoAngleMax[i]) / 2.0;
+    startPositions[i] = currentPositions[i];
+    targetPositions[i] = currentPositions[i];
+    
+    uint16_t pulse = angleToPulse(i, (int)currentPositions[i]);
+    pwm.setPWM(i, 0, pulse);
+  }
+  lastInterpUpdate = millis();
+}
+
+void loop(){
+  if (!client.connected()){
+    reconnect();
+  }
+  client.loop();
+
+  // Run the interpolation routine every interpInterval (20ms)
+  unsigned long now = millis();
+  if (now - lastInterpUpdate >= interpInterval) {
+    lastInterpUpdate = now;
+    
+    // Calculate fraction of interpolation completed:
+    float t = (float)(now - interpStartTime) / interpDuration;
+    if (t > 1.0) t = 1.0;  // Cap at the target.
+    
+    // For each servo, compute the new current position:
+    for (int i = 0; i < 16; i++){
+      currentPositions[i] = startPositions[i] + t * (targetPositions[i] - startPositions[i]);
+      int angle = round(currentPositions[i]);      
+      uint16_t pulse = angleToPulse(i, angle);
+      pwm.setPWM(i, 0, pulse);
+    }
+  }
+}
