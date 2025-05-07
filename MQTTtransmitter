@@ -1,0 +1,160 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// ===== WiFi and MQTT Credentials =====
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+const char* mqtt_server = "151.95.192.8";
+const int   mqtt_port   = 1883;
+const char* mqtt_user   = "Tonno16bit";
+const char* mqtt_pass   = "987654321";
+const char* mqtt_topic  = "servo/positions";  // Publishing a JSON array for 16 channels
+
+// ===== Multiplexer Pin Definitions =====
+// These digital pins drive the CD74HC4067 selection lines.
+// Adjust the numbers based on your wiring.
+#define MUX_S0       16
+#define MUX_S1       17
+#define MUX_S2       18
+#define MUX_S3       19
+// The analog signal pin from the multiplexer (ensure this is an ADC-capable pin)
+#define MUX_SIG_PIN  36
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// ===== Calibration Arrays for the Potentiometers =====
+// Raw ADC limits for each channel (default: full 0-4095 range)
+// You can adjust these per channel if needed.
+int potRawMin[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+int potRawMax[16] = { 4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095,
+                      4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095 };
+
+// The desired output (mapped) angle range for each potentiometer
+// Default here is from 45 to 135 degrees for each channel.
+int potAngleMin[16] = { 45, 45, 45, 45, 45, 45, 45, 45,
+                        45, 45, 45, 45, 45, 45, 45, 45 };
+int potAngleMax[16] = { 135, 135, 135, 135, 135, 135, 135, 135,
+                        135, 135, 135, 135, 135, 135, 135, 135 };
+
+// Last published angles for change detection
+int lastAngles[16] = {0};
+
+// Publish check interval and a threshold for change detection (in degrees)
+unsigned long lastPublish = 0;
+const unsigned long publishInterval = 200; // check every 200ms
+const int changeThreshold = 2;             // degrees
+
+// ----- WiFi Connection Function -----
+void setup_wifi(){
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ----- MQTT Reconnection Function -----
+void reconnect() {
+  while (!client.connected()){
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32Publisher", mqtt_user, mqtt_pass)){
+      Serial.println(" connected");
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" retrying in 5 seconds...");
+      delay(5000);
+    }
+  }
+}
+
+// ----- Multiplexer Channel Selector -----
+// Sets the digital output lines S0–S3 based on a channel number (0..15)
+void selectMuxChannel(int channel){
+  digitalWrite(MUX_S0, channel & 0x01);
+  digitalWrite(MUX_S1, (channel >> 1) & 0x01);
+  digitalWrite(MUX_S2, (channel >> 2) & 0x01);
+  digitalWrite(MUX_S3, (channel >> 3) & 0x01);
+}
+
+void setup(){
+  Serial.begin(115200);
+
+  // Setup multiplexer select pins as outputs
+  pinMode(MUX_S0, OUTPUT);
+  pinMode(MUX_S1, OUTPUT);
+  pinMode(MUX_S2, OUTPUT);
+  pinMode(MUX_S3, OUTPUT);
+  // Setup multiplexer signal pin as input
+  pinMode(MUX_SIG_PIN, INPUT);
+
+  setup_wifi();
+  client.setServer(mqtt_server, mqtt_port);
+
+  // Initialize lastAngles with the current readings for a smooth start.
+  for (int ch = 0; ch < 16; ch++){
+    selectMuxChannel(ch);
+    delay(5);  // allow settling time
+    int rawValue = analogRead(MUX_SIG_PIN);
+    int angle = map(rawValue, potRawMin[ch], potRawMax[ch],
+                          potAngleMin[ch], potAngleMax[ch]);
+    lastAngles[ch] = angle;
+  }
+}
+
+void loop(){
+  if (!client.connected()){
+    reconnect();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastPublish >= publishInterval){
+    lastPublish = now;
+    bool changed = false;
+    int angles[16];
+
+    // Read all 16 channels through the multiplexer
+    for (int ch = 0; ch < 16; ch++){
+      selectMuxChannel(ch);
+      delay(2); // allow settling
+      int rawValue = analogRead(MUX_SIG_PIN);
+      int angle = map(rawValue, potRawMin[ch], potRawMax[ch],
+                            potAngleMin[ch], potAngleMax[ch]);
+      angles[ch] = angle;
+
+      // Check if the change exceeds the threshold for this channel
+      if (abs(angle - lastAngles[ch]) > changeThreshold) {
+        changed = true;
+      }
+    }
+
+    // Only publish if at least one channel changed significantly.
+    if (changed){
+      // Build a JSON array string: "[val0,val1,...,val15]"
+      String payload = "[";
+      for (int i = 0; i < 16; i++){
+        payload += String(angles[i]);
+        if (i < 15)
+          payload += ",";
+        // Update the lastAngles for future comparison
+        lastAngles[i] = angles[i];
+      }
+      payload += "]";
+      
+      if(client.publish(mqtt_topic, payload.c_str())){
+        Serial.print("Published: ");
+        Serial.println(payload);
+      }
+      else {
+        Serial.println("Warning: Publish failed.");
+      }
+    }
+  }
+}
