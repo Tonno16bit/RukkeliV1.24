@@ -1,0 +1,104 @@
+#include <WiFi.h>
+#include <esp_now.h>
+/****************************************************************************** 
+CODICE CORRETTO, COMMENTATO ED OTTIMIZZATO PER TRASMETTITORE ESPNOW
+ancora da testare, mancano:
+    - redifinizione pin MUX
+    - sostituzione MAC address con quello corretto
+*****************************************************************************/
+// ---------------------
+// Definizione pin
+// ---------------------
+#define MUX_S0 32      // questi 4 pin serviranno a trasmettere valori booleani
+#define MUX_S1 33      // tramite le combinazioni HIGH-LOW di questi pin si può 
+#define MUX_S2 25      // ricostruire un valore booleano a 4 cifre, cioè da 
+#define MUX_S3 26      // 0 (0000 base 2) a 15 (1111 base 2). di conseguenza si
+#define MUX_SIG_PIN 34 // possono avere 16 combinazioni (tante quante le entrate pot)
+/* il signal pin invece ha una funzione diversa. esso prende effettivamente i dati
+ricapitolando i 4 S pin servono a decidere da dove prendere il segnale e il SIG pin
+serve proprio a prenderlo il segnale*/
+// --------------------------------------
+// Struttura per ricevimento e invio dati
+// --------------------------------------
+typedef struct struct_message {
+  int readings[16]; 
+} struct_message;
+struct_message potval;
+
+// ---------------------
+// ESP‑NOW Peer: Set your slave's MAC address here!
+// Replace with your slave ESP32's MAC address.
+uint8_t slaveAddress[] = { 0x24, 0x6F, 0x28, 0xAB, 0xCD, 0xEF };
+
+#define CHANNEL 1   // ESP‑NOW operates on a given WiFi channel (ensure both ESP32 use the same)
+
+// ---------------------
+// Callback when data is sent
+// ---------------------
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Packet send status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+}
+
+void setup() {
+  Serial.begin(115200);
+  while(!Serial);
+  // Initialize multiplexer select pins as outputs
+  pinMode(MUX_S0, OUTPUT);
+  pinMode(MUX_S1, OUTPUT);
+  pinMode(MUX_S2, OUTPUT);
+  pinMode(MUX_S3, OUTPUT);
+  // The multiplexer signal pin is used as an analog input
+  pinMode(MUX_SIG_PIN, INPUT);
+
+  // Set WiFi to STA mode and initialize ESP‑NOW
+  WiFi.mode(WIFI_STA);
+  Serial.println("Master ESP32 started (STA mode)");
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP‑NOW");
+    return;
+  }
+  // Register ESP‑NOW send callback
+  esp_now_register_send_cb(OnDataSent);
+
+  // Add peer (the slave) so ESP‑NOW sends only to that device
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, slaveAddress, 6);
+  peerInfo.channel = CHANNEL;
+  peerInfo.encrypt = false;
+  
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    return;
+  }
+}
+
+void loop() {
+  // Loop through all 16 channels of the multiplexer
+  for (int channel = 0; channel < 16; channel++) {
+    // Set the 4-bit binary value on the select lines
+    digitalWrite(MUX_S0, bitRead(channel, 0));
+    digitalWrite(MUX_S1, bitRead(channel, 1));
+    digitalWrite(MUX_S2, bitRead(channel, 2));
+    digitalWrite(MUX_S3, bitRead(channel, 3));
+    
+    // Allow a brief stabilization time for analog signal (adjust if needed)
+    delayMicroseconds(50);
+    
+    // Read the analog value for the current channel
+    int reading = analogRead(MUX_SIG_PIN);
+    potval.readings[channel] = reading;
+  }
+  
+  // Send the complete data packet via ESP‑NOW
+  esp_err_t result = esp_now_send(slaveAddress, (uint8_t *) &potval, sizeof(potval));
+  if(result == ESP_OK) {
+    Serial.println("Data sent successfully");
+  } else {
+    Serial.println("Error sending data");
+  }
+  
+  // Maintain a 50 Hz send rate (every 20 ms)
+  delay(20);
+}
