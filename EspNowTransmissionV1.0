@@ -26,14 +26,16 @@ typedef struct struct_message {
 struct_message potval;
 
 // ---------------------
-// ESP‑NOW Peer: Set your slave's MAC address here!
-// Replace with your slave ESP32's MAC address.
+// ESP‑NOW Peer
+// questa è unna variabile che serve a memorizzare il MAC address 
+// il MAC è univoco ad ogni dispositivo e serve ad identificarlo  
+// con certezza in una rete
 uint8_t slaveAddress[] = { 0x24, 0x6F, 0x28, 0xAB, 0xCD, 0xEF };
 
-#define CHANNEL 1   // ESP‑NOW operates on a given WiFi channel (ensure both ESP32 use the same)
+#define CHANNEL 1   // ESP‑NOW opera su un canale Wi-Fi specifico (devono entrambi usare lo stesso canale)
 
 // ---------------------
-// Callback when data is sent
+// Callback chiamato quando arrivano i dati
 // ---------------------
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.print("Packet send status: ");
@@ -41,14 +43,14 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200); //queste due righe iniziano la comunicazione seriale utile alla diagnostica
   while(!Serial);
-  // Initialize multiplexer select pins as outputs
+  // Inizializzazione pin multiplexer
   pinMode(MUX_S0, OUTPUT);
   pinMode(MUX_S1, OUTPUT);
   pinMode(MUX_S2, OUTPUT);
   pinMode(MUX_S3, OUTPUT);
-  // The multiplexer signal pin is used as an analog input
+  // il pin del segnale verrà utilizzato come input analogico
   pinMode(MUX_SIG_PIN, INPUT);
 
   // Set WiFi to STA mode and initialize ESP‑NOW
