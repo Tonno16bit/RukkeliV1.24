@@ -1,106 +1,150 @@
-#include <WiFi.h>
 #include <esp_now.h>
-/****************************************************************************** 
-CODICE CORRETTO, COMMENTATO ED OTTIMIZZATO PER TRASMETTITORE ESPNOW
-ancora da testare, mancano:
-    - redifinizione pin MUX
-    - sostituzione MAC address con quello corretto
-*****************************************************************************/
-// ---------------------
-// Definizione pin
-// ---------------------
-#define MUX_S0 32      // questi 4 pin serviranno a trasmettere valori booleani
-#define MUX_S1 33      // tramite le combinazioni HIGH-LOW di questi pin si può 
-#define MUX_S2 25      // ricostruire un valore booleano a 4 cifre, cioè da 
-#define MUX_S3 26      // 0 (0000 base 2) a 15 (1111 base 2). di conseguenza si
-#define MUX_SIG_PIN 34 // possono avere 16 combinazioni (tante quante le entrate pot)
-/* il signal pin invece ha una funzione diversa. esso prende effettivamente i dati
-ricapitolando i 4 S pin servono a decidere da dove prendere il segnale e il SIG pin
-serve proprio a prenderlo il segnale*/
-// --------------------------------------
-// Struttura per ricevimento e invio dati
-// --------------------------------------
+#include <WiFi.h>
+
+// REPLACE WITH YOUR RECEIVER MAC Address
+uint8_t broadcastAddress[] = {0x70, 0x04, 0x1d, 0x93, 0x67, 0xd0};
+//70:04:1d:93:67:d0
+
+// Structure example to send data
+// Must match the receiver structure
 typedef struct struct_message {
-  int readings[16]; 
+  int b[16];
 } struct_message;
-struct_message potval;
 
-// ---------------------
-// ESP‑NOW Peer
-// questa è unna variabile che serve a memorizzare il MAC address 
-// il MAC è univoco ad ogni dispositivo e serve ad identificarlo  
-// con certezza in una rete
-uint8_t slaveAddress[] = { 0x24, 0x6F, 0x28, 0xAB, 0xCD, 0xEF };
+// Create a struct_message called payload
+struct_message payload;
 
-#define CHANNEL 1   // ESP‑NOW opera su un canale Wi-Fi specifico (devono entrambi usare lo stesso canale)
+esp_now_peer_info_t peerInfo;
 
-// ---------------------
-// Callback chiamato quando arrivano i dati
-// ---------------------
+ // Define multiplexer selection pins
+const int S0 = 5;
+const int S1 = 6;
+const int S2 = 7;
+const int S3 = 15;
+
+// Define the analog input pin connected to the multiplexer output (SIG)
+const int SIG_PIN = 4;
+
+// An array holding the select pins for easy looping
+const int controlPins[4] = { S0, S1, S2, S3 };
+
+// Define the number of potentiometers (ADC inputs)
+const int NUM_POTS = 16;
+
+// List of the ADC pins in the desired order
+const int potPins[NUM_POTS] = {4, 5, 6, 7, 15, 16, 17, 18, 8, 3, 9, 10, 11, 12, 13, 14};
+
+// Array to hold the potentiometer values
+int potValues[NUM_POTS];
+
+// Define a lookup table for each of the 16 channels.
+// Each row corresponds to a channel (0 - 15) and the values set for S0, S1, S2, S3.
+int muxChannel[16][4] = {
+  {0, 0, 0, 0}, // Channel 0
+  {1, 0, 0, 0}, // Channel 1
+  {0, 1, 0, 0}, // Channel 2
+  {1, 1, 0, 0}, // Channel 3
+  {0, 0, 1, 0}, // Channel 4
+  {1, 0, 1, 0}, // Channel 5
+  {0, 1, 1, 0}, // Channel 6
+  {1, 1, 1, 0}, // Channel 7
+  {0, 0, 0, 1}, // Channel 8
+  {1, 0, 0, 1}, // Channel 9
+  {0, 1, 0, 1}, // Channel 10
+  {1, 1, 0, 1}, // Channel 11
+  {0, 0, 1, 1}, // Channel 12
+  {1, 0, 1, 1}, // Channel 13
+  {0, 1, 1, 1}, // Channel 14
+  {1, 1, 1, 1}  // Channel 15
+};
+
+// callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
-  Serial.print("Packet send status: ");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
+  Serial.print("\r\nLast Packet Send Status:\t");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
-
+ 
 void setup() {
-  Serial.begin(115200); //queste due righe iniziano la comunicazione seriale utile alla diagnostica
-  while(!Serial);
-  // Inizializzazione pin multiplexer
-  pinMode(MUX_S0, OUTPUT);
-  pinMode(MUX_S1, OUTPUT);
-  pinMode(MUX_S2, OUTPUT);
-  pinMode(MUX_S3, OUTPUT);
-  // il pin del segnale verrà utilizzato come input analogico
-  pinMode(MUX_SIG_PIN, INPUT);
-
-  // Set WiFi to STA mode and initialize ESP‑NOW
+  // Init Serial Monitor
+  Serial.begin(115200);
+ 
+  // Set device as a Wi-Fi Station
   WiFi.mode(WIFI_STA);
-  Serial.println("Master ESP32 started (STA mode)");
 
+  // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP‑NOW");
+    Serial.println("Error initializing ESP-NOW");
     return;
   }
-  // Register ESP‑NOW send callback
-  esp_now_register_send_cb(OnDataSent);
 
-  // Add peer (the slave) so ESP‑NOW sends only to that device
-  esp_now_peer_info_t peerInfo;
-  memcpy(peerInfo.peer_addr, slaveAddress, 6);
-  peerInfo.channel = CHANNEL;
+  // Once ESPNow is successfully Init, we will register for Send CB to
+  // get the status of Trasnmitted packet
+  esp_now_register_send_cb(OnDataSent);
+  
+  // Register peer
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
   peerInfo.encrypt = false;
   
-  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+  // Add peer        
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
     Serial.println("Failed to add peer");
     return;
   }
+  /*for (int i = 0; i < 4; i++) {
+    pinMode(controlPins[i], OUTPUT);
+    digitalWrite(controlPins[i], LOW);
+  }
+  pinMode(SIG_PIN, INPUT);*/
+  // Optionally set ADC resolution (e.g., 12-bit: 0-4095)
+  analogReadResolution(12);
+
+  // Configure each pin as input (not always necessary for analogRead but useful for clarity)
+  for (int i = 0; i < NUM_POTS; i++) {
+    pinMode(potPins[i], INPUT);
+  }
 }
 
+int readMuxChannel(int channel) {
+  // Set the multiplexer selection pins according to the lookup
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(controlPins[i], muxChannel[channel][i]);
+  }
+  
+  // Optionally, a short delay allows the multiplexer to settle after switching channels
+  delayMicroseconds(8);
+  
+  // Read the analog value from the multiplexer output pin and return it
+  return analogRead(SIG_PIN);
+}
+
+int readPot(int channel){
+  for (int i = 0; i < NUM_POTS; i++) {
+    payload.b[i] = analogRead(potPins[i]);
+  }
+  delay(1);
+
+}
+void sendMessage(){
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &payload, sizeof(payload));
+   
+  if (result == ESP_OK) {
+    Serial.println("Sent with success");
+  }
+  else {
+    Serial.println("Error sending the data");
+  }
+  return;
+}
+ 
 void loop() {
-  // Loop through all 16 channels of the multiplexer
-  for (int channel = 0; channel < 16; channel++) {
-    // Set the 4-bit binary value on the select lines
-    digitalWrite(MUX_S0, bitRead(channel, 0));
-    digitalWrite(MUX_S1, bitRead(channel, 1));
-    digitalWrite(MUX_S2, bitRead(channel, 2));
-    digitalWrite(MUX_S3, bitRead(channel, 3));
-    
-    // Allow a brief stabilization time for analog signal (adjust if needed)
-    delayMicroseconds(50);
-    
-    // Read the analog value for the current channel
-    int reading = analogRead(MUX_SIG_PIN);
-    potval.readings[channel] = reading;
-  }
+  // Set values to send
+  /*for(int i=0;i<16;i++){
+    payload.b[i]=readMuxChannel(i);
+    delay(2);
+  }*/
   
-  // Send the complete data packet via ESP‑NOW
-  esp_err_t result = esp_now_send(slaveAddress, (uint8_t *) &potval, sizeof(potval));
-  if(result == ESP_OK) {
-    Serial.println("Data sent successfully");
-  } else {
-    Serial.println("Error sending data");
-  }
-  
-  // Maintain a 50 Hz send rate (every 20 ms)
-  delay(20);
+  // Send message via ESP-NOW
+  sendMessage();
+  delay(4);//7ms totali di delay per lettura di ogni pot. 112ms lettura tutti i pot
 }
