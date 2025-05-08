@@ -1,132 +1,57 @@
-#include <WiFi.h>
 #include <esp_now.h>
+#include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 
-// ---------------------
-// Expected Master MAC Address
-// ---------------------
-// IMPORTANT: Replace with your master ESP32's MAC address.
-uint8_t masterAddress[] = { 0x30, 0xAE, 0xA4, 0x12, 0x34, 0x56 };
-
-#define CHANNEL 1   // Same channel as used in the master
-
-// ---------------------
-// Data Structure (must match master's structure)
-// ---------------------
-typedef struct struct_message {
-  int readings[16];  
-} struct_message;
-struct_message incomingData;
-
-// ---------------------
-// PCA9685 Servo Controller
-// ---------------------
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+#define SERVO_FREQ 50
 
-// Servo control parameters (adjust as necessary)
-const int SERVOMIN = 150;  // Minimum pulse length count
-const int SERVOMAX = 600;  // Maximum pulse length count
+// Structure example to receive data
+// Must match the sender structure
+typedef struct struct_message {
+  int b[16];
+} struct_message;
 
-// Arrays to hold current and target angles for 16 servos (degrees)
-float currentServoAngles[16];
-float targetServoAngles[16];
-const float interpolationFactor = 0.2;  // Factor for linear interpolation (0 < factor <= 1)
+// Create a struct_message called myData
+struct_message myData;
 
-// For dropout detection
-unsigned long lastPacketTime = 0;
-const unsigned long dropoutThreshold = 100;  // ms
-
-// ---------------------
-// Utility Functions
-// ---------------------
-int angleToPulse(float angle) {
-  // Maps angle (0-180) to PCA9685 pulse length between SERVOMIN and SERVOMAX.
-  return SERVOMIN + (angle / 180.0) * (SERVOMAX - SERVOMIN);
+// callback function that will be executed when data is received
+void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+  memcpy(&myData, incomingData, sizeof(myData));
+  Serial.print("Bytes received: ");
+  for(int i=0;i<16;i++){
+    Serial.print("pot num ");
+    Serial.print(i);
+    Serial.println(":");
+    Serial.println(myData.b[i]);
+    pwm.setPWM(i, 0, myData.b[i]);
+  }
+  Serial.println();
 }
-
-void updateServos() {
-  for (int i = 0; i < 16; i++) {
-    // Update the current angle with a linear interpolation towards the target.
-    currentServoAngles[i] = currentServoAngles[i] + (targetServoAngles[i] - currentServoAngles[i]) * interpolationFactor;
-    int pulse = angleToPulse(currentServoAngles[i]);
-    pwm.setPWM(i, 0, pulse);
-  }
-}
-
-void checkCommunicationTimeout() {
-  if (millis() - lastPacketTime > dropoutThreshold) {
-    Serial.println("Warning: Communication dropout detected!");
-    // Optionally, you could set targetServoAngles[i] = currentServoAngles[i] here to pause movements.
-  }
-}
-
-// ---------------------
-// ESP‑NOW Receive Callback
-// ---------------------
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingDataRaw, int len) {
-  // Ensure that we only process packets from our trusted master.
-  if (memcmp(mac, masterAddress, 6) != 0) {
-    Serial.println("Received packet from unrecognized source. Ignoring...");
-    return;
-  }
-
-  // Verify the packet size.
-  if (len != sizeof(struct_message)) {
-    Serial.println("Incorrect packet size received. Ignoring...");
-    return;
-  }
-
-  // Copy the incoming data to our structure.
-  memcpy(&incomingData, incomingDataRaw, sizeof(incomingData));
-
-  // Map each potentiometer reading to a servo angle (0-180°).
-  // Adjust the mapping as needed depending on the actual range of your ADC.
-  for (int i = 0; i < 16; i++) {
-    int reading = incomingData.readings[i];
-    // The Arduino map() returns a long integer. Casting to float for smooth interpolation.
-    targetServoAngles[i] = (float) map(reading, 0, 4095, 0, 180);
-  }
-  lastPacketTime = millis();
-}
-
+ 
 void setup() {
+  // Initialize Serial Monitor
   Serial.begin(115200);
-  WiFi.mode(WIFI_STA);
-  Serial.println("Slave ESP32 started (STA mode)");
+  
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(SERVO_FREQ);  // Analog servos run at ~50 Hz updates
 
-  // Initialize ESP‑NOW
+  delay(10);
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+
+  // Init ESP-NOW
   if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP‑NOW");
+    Serial.println("Error initializing ESP-NOW");
     return;
   }
-  esp_now_register_recv_cb(OnDataRecv);
-
-  // Initialize the PCA9685 servo controller
-  pwm.begin();
-  pwm.setOscillatorFrequency(27000000); // Set to 27MHz; adjust if needed.
-  pwm.setPWMFreq(50);  // Standard servo frequency: 50Hz
-  Serial.println("PCA9685 initialized");
-
-  // Initialize servo positions (all servos at 90° initially)
-  for (int i = 0; i < 16; i++) {
-    currentServoAngles[i] = 90.0;
-    targetServoAngles[i] = 90.0;
-    int pulse = angleToPulse(90.0);
-    pwm.setPWM(i, 0, pulse);
-  }
-
-  // Set initial time for dropout detection
-  lastPacketTime = millis();
+  
+  // Once ESPNow is successfully Init, we will register for recv CB to
+  // get recv packer info
+  esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
 }
-
+ 
 void loop() {
-  // Update servo positions using interpolation
-  updateServos();
-  
-  // Check if communication is still active
-  checkCommunicationTimeout();
-  
-  // Update at 50Hz
-  delay(20);
+
 }
