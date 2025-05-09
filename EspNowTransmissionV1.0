@@ -1,9 +1,10 @@
 #include <esp_now.h>
 #include <WiFi.h>
 
+/*ESPNOW VARIABLES SECTION*/
 // REPLACE WITH YOUR RECEIVER MAC Address
-uint8_t broadcastAddress[] = {0x70, 0x04, 0x1d, 0x93, 0x67, 0xd0};
-//70:04:1d:93:67:d0
+uint8_t broadcastAddress[] = {0x70, 0x04, 0x1D, 0x93, 0x67, 0xD0};
+//70:04:1D:93:67:D0
 
 // Structure example to send data
 // Must match the receiver structure
@@ -11,63 +12,45 @@ typedef struct struct_message {
   int b[16];
 } struct_message;
 
-// Create a struct_message called payload
-struct_message payload;
+// Create a struct_message called myData
+struct_message myData;
 
 esp_now_peer_info_t peerInfo;
 
- // Define multiplexer selection pins
-const int S0 = 5;
-const int S1 = 6;
-const int S2 = 7;
-const int S3 = 15;
-
-// Define the analog input pin connected to the multiplexer output (SIG)
-const int SIG_PIN = 4;
-
-// An array holding the select pins for easy looping
-const int controlPins[4] = { S0, S1, S2, S3 };
-
-// Define the number of potentiometers (ADC inputs)
-const int NUM_POTS = 16;
-
-// List of the ADC pins in the desired order
-const int potPins[NUM_POTS] = {4, 5, 6, 7, 15, 16, 17, 18, 8, 3, 9, 10, 11, 12, 13, 14};
-
-// Array to hold the potentiometer values
-int potValues[NUM_POTS];
-
-// Define a lookup table for each of the 16 channels.
-// Each row corresponds to a channel (0 - 15) and the values set for S0, S1, S2, S3.
-int muxChannel[16][4] = {
-  {0, 0, 0, 0}, // Channel 0
-  {1, 0, 0, 0}, // Channel 1
-  {0, 1, 0, 0}, // Channel 2
-  {1, 1, 0, 0}, // Channel 3
-  {0, 0, 1, 0}, // Channel 4
-  {1, 0, 1, 0}, // Channel 5
-  {0, 1, 1, 0}, // Channel 6
-  {1, 1, 1, 0}, // Channel 7
-  {0, 0, 0, 1}, // Channel 8
-  {1, 0, 0, 1}, // Channel 9
-  {0, 1, 0, 1}, // Channel 10
-  {1, 1, 0, 1}, // Channel 11
-  {0, 0, 1, 1}, // Channel 12
-  {1, 0, 1, 1}, // Channel 13
-  {0, 1, 1, 1}, // Channel 14
-  {1, 1, 1, 1}  // Channel 15
-};
+/*MULTIPLEXER VARIABLES SECTION*/
+const int muxSignalPin = 4;
+const int muxS0 = 15;
+const int muxS1 = 7;
+const int muxS2 = 6;
+const int muxS3 = 5;
 
 // callback when data is sent
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.print("\r\nLast Packet Send Status:\t");
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
- 
+
+// function to read the potentiometer values from the multiplexer
+int readPot(int channel) {
+  // The channel number (0-15) is represented in binary across four address pins.
+  digitalWrite(muxS0, bitRead(channel, 0));
+  digitalWrite(muxS1, bitRead(channel, 1));
+  digitalWrite(muxS2, bitRead(channel, 2));
+  digitalWrite(muxS3, bitRead(channel, 3));
+  
+  // A short delay allows the multiplexer output to settle.
+  delayMicroseconds(5);
+  
+  // Read and return the analog value from the selected channel
+  return analogRead(muxSignalPin);
+}
+
+
 void setup() {
   // Init Serial Monitor
   Serial.begin(115200);
- 
+  while(!Serial);
+  /*ESPNOW INITIALIZATION SECTION*/
   // Set device as a Wi-Fi Station
   WiFi.mode(WIFI_STA);
 
@@ -91,42 +74,20 @@ void setup() {
     Serial.println("Failed to add peer");
     return;
   }
-  /*for (int i = 0; i < 4; i++) {
-    pinMode(controlPins[i], OUTPUT);
-    digitalWrite(controlPins[i], LOW);
-  }
-  pinMode(SIG_PIN, INPUT);*/
-  // Optionally set ADC resolution (e.g., 12-bit: 0-4095)
-  analogReadResolution(12);
-
-  // Configure each pin as input (not always necessary for analogRead but useful for clarity)
-  for (int i = 0; i < NUM_POTS; i++) {
-    pinMode(potPins[i], INPUT);
-  }
+  /*MULTIPLEXER INITIALIZATION SECTION*/
+  pinMode(muxS0, OUTPUT);
+  pinMode(muxS1, OUTPUT);
+  pinMode(muxS2, OUTPUT);
+  pinMode(muxS3, OUTPUT);
 }
-
-int readMuxChannel(int channel) {
-  // Set the multiplexer selection pins according to the lookup
-  for (int i = 0; i < 4; i++) {
-    digitalWrite(controlPins[i], muxChannel[channel][i]);
+ 
+void loop() {
+  // Set values to send
+  for(int i=0;i<16;i++){
+    myData.b[i] = readPot(i);
   }
-  
-  // Optionally, a short delay allows the multiplexer to settle after switching channels
-  delayMicroseconds(8);
-  
-  // Read the analog value from the multiplexer output pin and return it
-  return analogRead(SIG_PIN);
-}
-
-int readPot(int channel){
-  for (int i = 0; i < NUM_POTS; i++) {
-    payload.b[i] = analogRead(potPins[i]);
-  }
-  delay(1);
-
-}
-void sendMessage(){
-  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &payload, sizeof(payload));
+  // Send message via ESP-NOW
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &myData, sizeof(myData));
    
   if (result == ESP_OK) {
     Serial.println("Sent with success");
@@ -134,17 +95,5 @@ void sendMessage(){
   else {
     Serial.println("Error sending the data");
   }
-  return;
-}
- 
-void loop() {
-  // Set values to send
-  /*for(int i=0;i<16;i++){
-    payload.b[i]=readMuxChannel(i);
-    delay(2);
-  }*/
-  
-  // Send message via ESP-NOW
-  sendMessage();
-  delay(4);//7ms totali di delay per lettura di ogni pot. 112ms lettura tutti i pot
+  delay(200);
 }
